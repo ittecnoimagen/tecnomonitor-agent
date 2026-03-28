@@ -1,0 +1,13 @@
+# Archivos compilados y ejecutables
+*.exe
+dist/
+build/
+__pycache__/
+*.spec
+
+# Seguridad y configuración local
+secret.key
+monitor_config
+
+# Logs y temporales
+*.log

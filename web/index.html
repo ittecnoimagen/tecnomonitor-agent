@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TecnoMonitor Agent - Configuración</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; }
+        .header-bar { background-color: #2c3e50; color: white; padding: 15px 20px; }
+        .status-badge { position: absolute; top: 20px; right: 20px; }
+        .console-box { 
+            background-color: #1e1e1e; 
+            color: #00ff00; 
+            font-family: 'Consolas', monospace; 
+            font-size: 0.85rem; 
+            height: 150px; 
+            overflow-y: auto; 
+            border-radius: 5px; 
+            padding: 10px;
+        }
+        .card-header .form-check { margin: 0; }
+        .fade-field { transition: all 0.3s ease-in-out; }
+    </style>
+    <script type="text/javascript" src="/eel.js"></script>
+</head>
+<body>
+
+    <div id="lockOverlay" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(25, 30, 36, 0.98); z-index: 99999; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+        <h2 style="margin-bottom: 10px; font-size: 28px;">🔒 Acceso Restringido</h2>
+        <p style="margin-bottom: 25px; color: #b0b3b8; font-size: 14px;">Ingrese el código de seguridad para configurar el Agente.</p>
+        
+        <input type="password" id="adminCodeInput" placeholder="Código de acceso" 
+               style="padding: 12px 15px; font-size: 16px; margin-bottom: 20px; text-align: center; border-radius: 6px; border: 1px solid #4a4e59; background: #2a2e39; color: white; outline: none; width: 250px; transition: border-color 0.3s;">
+        
+        <button onclick="unlockApp()" style="padding: 12px 30px; font-size: 16px; cursor: pointer; background-color: #0d6efd; color: white; border: none; border-radius: 6px; font-weight: bold; transition: background-color 0.3s;">
+            Desbloquear
+        </button>
+        
+        <p id="lockError" style="color: #ff4c4c; display: none; margin-top: 15px; font-weight: bold; font-size: 14px;">❌ Código incorrecto.</p>
+    </div>
+
+    <script>
+    function unlockApp() {
+        const code = document.getElementById("adminCodeInput").value;
+        if (code === "TM4dm1n") {
+            const overlay = document.getElementById("lockOverlay");
+            overlay.style.transition = "opacity 0.4s ease";
+            overlay.style.opacity = "0";
+            setTimeout(() => { overlay.style.display = "none"; }, 400);
+        } else {
+            document.getElementById("lockError").style.display = "block";
+            document.getElementById("adminCodeInput").value = "";
+            document.getElementById("adminCodeInput").focus();
+        }
+    }
+
+    document.getElementById("adminCodeInput").addEventListener("keypress", function(event) {
+        if (event.key === "Enter") {
+            event.preventDefault();
+            unlockApp();
+        }
+    });
+    </script>
+    
+    <div class="header-bar d-flex justify-content-between align-items-center shadow">
+        <div>
+            <h3 class="mb-0 fw-bold">TecnoMonitor Agent</h3>
+            <small class="text-white-50">Configuración Local v4.0 Gold</small>
+        </div>
+        <div id="service_status_badge">
+            <span class="badge bg-secondary">Cargando estado...</span>
+        </div>
+    </div>
+
+    <div class="container mt-4 pb-5">
+        
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center" style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_1">
+                <h5 class="mb-0 text-primary"><i class="fas fa-globe me-2"></i>1. Configuración Central</h5>
+                <i class="fas fa-chevron-down text-muted"></i>
+            </div>
+            <div id="collapse_1" class="collapse">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">ID Hospital</label>
+                            <input type="text" class="form-control" id="hosp_id" placeholder="Ej: H42">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Token de Autenticación</label>
+                            <input type="password" class="form-control" id="auth_token" oncopy="return false" oncut="return false" onpaste="return false" autocomplete="new-password">
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label">URL Servidor Central</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="central_url" placeholder="https://api.tecnoimagen.../v1/hospital-status">
+                                <button class="btn btn-warning text-white" onclick="testCentral()">Test Conexión</button>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Intervalo de Monitoreo (Minutos)</label>
+                            <input type="number" class="form-control" id="intervalo" value="5" min="1">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 text-primary" style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_2">
+                    <i class="fas fa-server me-2"></i>2. Hipervisor Host <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
+                </h5>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="enable_proxmox" checked onchange="toggleCard('proxmox_body', this)">
+                </div>
+            </div>
+            <div id="collapse_2" class="collapse">
+                <div class="card-body" id="proxmox_body">
+                    <div class="row g-3">
+                        <div class="col-md-12 mb-2">
+                            <label class="form-label fw-bold">Tecnología de Virtualización</label>
+                            <select class="form-select border-primary" id="hyper_type" onchange="toggleHypervisorFields()">
+                                <option value="proxmox">Proxmox VE (KVM)</option>
+                                <option value="vmware">VMware vSphere / ESXi</option>
+                            </select>
+                            <small class="text-muted" id="hyper_hint">Requiere IP, Usuario, Password y Nombre del Nodo.</small>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label">IP / Hostname</label>
+                            <input type="text" class="form-control" id="px_host" placeholder="Ej: 192.168.1.10">
+                        </div>
+                        
+                        <div class="col-md-6" id="px_node_container">
+                            <label class="form-label">Nombre del Nodo</label>
+                            <input type="text" class="form-control" id="px_node" placeholder="Ej: pve-01">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label">Usuario</label>
+                            <input type="text" class="form-control" id="px_user" placeholder="Ej: root@pam o administrator@vsphere.local">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Contraseña</label>
+                            <input type="password" class="form-control" id="px_pass" oncopy="return false" oncut="return false" onpaste="return false" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end mt-3">
+                        <button class="btn btn-warning text-white" onclick="testHypervisor()">
+                            <i class="fas fa-plug me-2"></i>Test Conexión
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 text-primary" style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_3">
+                    <i class="fas fa-microchip me-2"></i>3. Hardware Dell (iDRAC) <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
+                </h5>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="enable_idrac" onchange="toggleCard('idrac_body', this)">
+                </div>
+            </div>
+            <div id="collapse_3" class="collapse">
+                <div class="card-body" id="idrac_body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label">IP iDRAC</label>
+                            <input type="text" class="form-control" id="idrac_ip">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Usuario</label>
+                            <input type="text" class="form-control" id="idrac_user">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Contraseña</label>
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="idrac_pass" oncopy="return false" oncut="return false" onpaste="return false" autocomplete="new-password">
+                                <button class="btn btn-warning text-white" onclick="testIdrac()">Test</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 text-primary" style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_4">
+                    <i class="fas fa-desktop me-2"></i>4. Equipos Windows (VM / WS) <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
+                </h5>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="enable_vms" checked onchange="toggleCard('vms_body', this)">
+                </div>
+            </div>
+            <div id="collapse_4" class="collapse">
+                <div class="card-body" id="vms_body">
+                    <div id="vms_list">
+                        </div>
+                    <button class="btn btn-secondary w-100 mt-3" onclick="agregarVM()">
+                        <i class="fas fa-plus me-2"></i>Agregar Equipo (VM o WS) a Monitorear
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-4 shadow-sm">
+            <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                <h5 class="mb-0 text-primary" style="cursor: pointer;" data-bs-toggle="collapse" data-bs-target="#collapse_5">
+                    <i class="fas fa-database me-2"></i>5. Métricas de Negocio (SQL) <i class="fas fa-chevron-down ms-2 fs-6 text-muted"></i>
+                </h5>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="enable_sql" onchange="toggleCard('sql_body', this)">
+                </div>
+            </div>
+            <div id="collapse_5" class="collapse">
+                <div class="card-body" id="sql_body" style="opacity: 0.5; pointer-events: none;">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">IP / Hostname (SQL)</label>
+                            <input type="text" class="form-control border-primary" id="sql_host" placeholder="Ej: ARP19APPV">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Base de Datos</label>
+                            <input type="text" class="form-control" id="sql_db" value="ExtensaRadio">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Usuario (Lectura)</label>
+                            <input type="text" class="form-control" id="sql_user" placeholder="Ej: sa">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label text-muted small fw-bold">Contraseña</label>
+                            <input type="password" class="form-control" id="sql_pass" oncopy="return false" oncut="return false" onpaste="return false" autocomplete="new-password">
+                        </div>
+                        
+                        <div class="col-md-3 mt-3">
+                            <label class="form-label text-muted small fw-bold">Extracciones por Día</label>
+                            <div class="input-group">
+                                <input type="number" class="form-control" id="sql_exec_day" value="3" min="1" max="24">
+                            </div>
+                        </div>
+                        <div class="col-md-4 mt-3">
+                            <label class="form-label text-muted small fw-bold">Fecha Inicio (Backfill)</label>
+                            <input type="date" class="form-control" id="sql_start_date">
+                            <small class="text-muted d-block mt-1">Dejar vacío para iniciar hoy.</small>
+                        </div>
+                        <div class="col-md-5 mt-3 d-flex align-items-end justify-content-end gap-2">
+                            <button class="btn btn-danger shadow-sm text-white" onclick="resetHistorial()" title="Borrar memoria y forzar extracción desde la fecha elegida">
+                                <i class="fas fa-history"></i> Resetear Historial
+                            </button>
+                            <button class="btn btn-warning text-white shadow-sm" onclick="testSql()">
+                                <i class="fas fa-plug me-2"></i>Test
+                            </button>
+                        </div>
+                        </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card border-primary shadow">
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-3">
+                    <button class="btn btn-primary btn-lg" onclick="guardarConfiguracion()">
+                        <i class="fas fa-save me-2"></i>Guardar Configuración
+                    </button>
+                    <button class="btn btn-danger btn-lg" id="btn_monitor_toggle" onclick="toggleMonitoreo()">
+                        <i class="fas fa-stop me-2"></i>Detener Monitoreo
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="limpiarConsola()">
+                        <i class="fas fa-eraser me-1"></i>Limpiar Consola
+                    </button>
+                </div>
+                <label class="form-label fw-bold">Log de Actividad (En vivo)</label>
+                <div class="console-box" id="log_console">
+                    Esperando inicio del servicio...
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+{
+    "hospital_id": "P03",
+    "central_url": "http://176.52.142.115:8000/v1/hospital-status",
+    "auth_token": "gAAAAABpaBXaD1QBWGpUr8MAfvAjze2L5r3uqJvaGazMTWuUubtn9eePEXjF5Vj239VY_nLoGUGm1fVT-YGvCIVmdWp18R1sGl1jMLWlNmZYcEHaSHs-GMw=",
+    "interval_minutes": 5,
+    "enabled_proxmox": true,
+    "proxmox": {
+        "host": "172.31.3.156",
+        "user": "root@pam",
+        "pass": "gAAAAABpaBXanYxzMr1ivvMyHM5i7n4Oi7L1eqV4zjjY0lFROhfjXVQt3bThDy9p_vy32Y1ZeX8wI7R3Sh1Pnb-YmF7avSO4_A==",
+        "node": "pve"
+    },
+    "enabled_idrac": true,
+    "idrac": {
+        "ip": "172.31.3.155",
+        "user": "root",
+        "pass": "gAAAAABpaBXampao3Pk43-XyNavlKvZfxSU_cA6Ql1ggYYHSMzv7VV_daUe4PrSTM6gNhxKXd1uHi6h_QS5PBmqNBTgWEad56A=="
+    },
+    "enabled_vms": true,
+    "vms": [
+        {
+            "nombre": "APPV",
+            "ip": "172.31.3.150",
+            "user": "SUITESTENSA\\EBITADMIN",
+            "pass": "gAAAAABpaBXaGMzDH52O3Vf9_laM3MVIkri0j55lV4agps05dV7QS6jKJZ_-UBhK1b0I5GML3ukPG2OVOcdOK1DZvJHu455NAA==",
+            "servicios": [
+                "MSSQLSERVER",
+                "SLRadioService",
+                "SLCardioService"
+            ]
+        }
+    ]
+}

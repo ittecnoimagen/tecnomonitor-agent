@@ -1,0 +1,5 @@
+Compilar el Servicio (Invisible)
+pyinstaller --noconsole --onefile --name="TecnoMonitorConfig" --add-data "web;web" --hidden-import=wmi --hidden-import=win32com.client --hidden-import=proxmoxer --hidden-import=proxmoxer.backends.https main_gui.py
+
+Compilar la GUI
+pyinstaller --noconsole --onefile --name="TecnoMonitorService" --hidden-import=wmi --hidden-import=win32com.client --hidden-import=proxmoxer --hidden-import=proxmoxer.backends.https headless_service.py
