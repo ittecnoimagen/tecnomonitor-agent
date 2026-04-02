@@ -1,13 +1,22 @@
-# Archivos compilados y ejecutables
-*.exe
-dist/
-build/
+# Python basura
 __pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# PyInstaller (No subir los .exe, se generan localmente)
+build/
+dist/
 *.spec
 
-# Seguridad y configuración local
+# Datos sensibles y Logs (¡CRÍTICO!)
+monitor_config.json
+monitor_config.json.tmp
+activity.log
 secret.key
-monitor_config
+.sql_checkpoint
+.sql_checkpoint.tmp
 
-# Logs y temporales
-*.log
+# Inno Setup basura
+Output/
