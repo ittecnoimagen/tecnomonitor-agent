@@ -76,9 +76,6 @@ function bloquearBotonMonitoreo(segundos) {
     }, segundos * 1000);
 }
 
-// ---------------------------------------------------------------------------
-// CARGAR CONFIGURACIÓN
-// ---------------------------------------------------------------------------
 async function cargarConfiguracion() {
     try {
         const cfg = await eel.cargar_config()();
@@ -87,28 +84,28 @@ async function cargarConfiguracion() {
             return;
         }
 
-        // Central
-        document.getElementById('hosp_id').value    = cfg.hospital_id    || '';
-        document.getElementById('auth_token').value = cfg.auth_token     || '';
-        document.getElementById('central_url').value = cfg.central_url   || '';
-        document.getElementById('intervalo').value  = cfg.interval_minutes || 5;
+        // --- 1. Configuración Central ---
+        document.getElementById('hosp_id').value     = cfg.hospital_id || '';
+        document.getElementById('auth_token').value  = cfg.auth_token || '';
+        document.getElementById('central_url').value = cfg.central_url || '';
+        document.getElementById('intervalo').value   = cfg.interval_minutes || 5;
 
-        // Hipervisor
+        // --- 2. Hipervisor (Proxmox / VMware) ---
         if (cfg.proxmox) {
             document.getElementById('hyper_type').value = cfg.proxmox.type || 'proxmox';
             document.getElementById('px_host').value    = cfg.proxmox.host || '';
             document.getElementById('px_node').value    = cfg.proxmox.node || '';
             document.getElementById('px_user').value    = cfg.proxmox.user || '';
             document.getElementById('px_pass').value    = cfg.proxmox.pass || '';
-            toggleHypervisorFields();
+            toggleHypervisorFields(); // Ajusta la visibilidad según el tipo
         }
         const chkProxmox = document.getElementById('enable_proxmox');
         chkProxmox.checked = !!cfg.enabled_proxmox;
         toggleCard('proxmox_body', chkProxmox);
 
-        // iDRAC
+        // --- 3. Hardware Dell (iDRAC) ---
         if (cfg.idrac) {
-            document.getElementById('idrac_ip').value   = cfg.idrac.ip   || '';
+            document.getElementById('idrac_ip').value   = cfg.idrac.ip || '';
             document.getElementById('idrac_user').value = cfg.idrac.user || '';
             document.getElementById('idrac_pass').value = cfg.idrac.pass || '';
         }
@@ -116,46 +113,53 @@ async function cargarConfiguracion() {
         chkIdrac.checked = !!cfg.enabled_idrac;
         toggleCard('idrac_body', chkIdrac);
 
-        // VMs
+        // --- 4. Equipos Windows (VMs) ---
         const chkVms = document.getElementById('enable_vms');
         chkVms.checked = !!cfg.enabled_vms;
         toggleCard('vms_body', chkVms);
 
-        // SQL
+        const vmsContainer = document.getElementById('vms_list');
+        vmsContainer.innerHTML = '';
+        if (cfg.vms && cfg.vms.length > 0) {
+            cfg.vms.forEach(vm => agregarVM(vm));
+        }
+
+        // --- 5. Métricas de Negocio (SQL) ---
         if (cfg.sql) {
-            document.getElementById('sql_host').value      = cfg.sql.host  || '';
-            document.getElementById('sql_db').value        = cfg.sql.db    || 'ExtensaRadio';
-            document.getElementById('sql_user').value      = cfg.sql.user  || '';
-            document.getElementById('sql_pass').value      = cfg.sql.pass  || '';
-            document.getElementById('sql_exec_day').value  = cfg.sql.executions_per_day ||
-                (cfg.sql.interval_hours ? Math.floor(24 / cfg.sql.interval_hours) : 3);
+            document.getElementById('sql_host').value       = cfg.sql.host || '';
+            document.getElementById('sql_db').value         = cfg.sql.db || 'ExtensaRadio';
+            document.getElementById('sql_user').value       = cfg.sql.user || '';
+            document.getElementById('sql_pass').value       = cfg.sql.pass || '';
+            document.getElementById('sql_exec_day').value   = cfg.sql.executions_per_day || 3;
             document.getElementById('sql_start_date').value = cfg.sql.historical_start_date || '';
         }
         const chkSql = document.getElementById('enable_sql');
         chkSql.checked = !!cfg.enabled_sql;
         toggleCard('sql_body', chkSql);
 
-        // VMs list
-        const container = document.getElementById('vms_list');
-        container.innerHTML = '';
-        if (cfg.vms && cfg.vms.length > 0) {
-            cfg.vms.forEach(vm => agregarVM(vm));
+        // --- 6. Integraciones (Mirth Connect) --- (NUEVO v4.1)
+        const chkMirth = document.getElementById('enable_mirth');
+        chkMirth.checked = !!cfg.enabled_mirth;
+        toggleCard('mirth_body', chkMirth);
+
+        const mirthContainer = document.getElementById('mirth_list');
+        mirthContainer.innerHTML = '';
+        if (cfg.mirth_servers && cfg.mirth_servers.length > 0) {
+            cfg.mirth_servers.forEach(m => agregarMirth(m));
         }
 
     } catch (e) {
-        console.error("Error al cargar configuración:", e);
+        console.error("Error crítico al cargar configuración:", e);
     }
 }
 
-// ---------------------------------------------------------------------------
-// GUARDAR CONFIGURACIÓN
-// ---------------------------------------------------------------------------
 async function guardarConfiguracion() {
-    const btn          = document.querySelector('button[onclick="guardarConfiguracion()"]');
+    const btn = document.querySelector('button[onclick="guardarConfiguracion()"]');
     const originalText = btn.innerHTML;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Guardando...';
-    btn.disabled  = true;
+    btn.disabled = true;
 
+    // --- Recolectar lista de VMs ---
     const vms = [];
     document.querySelectorAll('.vm-card').forEach(card => {
         vms.push({
@@ -168,25 +172,37 @@ async function guardarConfiguracion() {
         });
     });
 
+    // --- Recolectar lista de Mirth Connect --- (NUEVO v4.1)
+    const mirth_servers = [];
+    document.querySelectorAll('.mirth-card').forEach(card => {
+        mirth_servers.push({
+            alias: card.querySelector('.mirth-alias').value.trim(),
+            url:   card.querySelector('.mirth-url').value.trim(),
+            user:  card.querySelector('.mirth-user').value.trim(),
+            pass:  card.querySelector('.mirth-pass').value,
+        });
+    });
+
+    // --- Construir objeto de configuración Maestro ---
     const config = {
-        hospital_id:      document.getElementById('hosp_id').value,
+        hospital_id:      document.getElementById('hosp_id').value.trim(),
         auth_token:       document.getElementById('auth_token').value,
-        central_url:      document.getElementById('central_url').value,
-        interval_minutes: document.getElementById('intervalo').value,
+        central_url:      document.getElementById('central_url').value.trim(),
+        interval_minutes: parseInt(document.getElementById('intervalo').value) || 5,
 
         enabled_proxmox: document.getElementById('enable_proxmox').checked,
         proxmox: {
             type: document.getElementById('hyper_type').value,
-            host: document.getElementById('px_host').value,
-            node: document.getElementById('px_node').value,
-            user: document.getElementById('px_user').value,
+            host: document.getElementById('px_host').value.trim(),
+            node: document.getElementById('px_node').value.trim(),
+            user: document.getElementById('px_user').value.trim(),
             pass: document.getElementById('px_pass').value,
         },
 
         enabled_idrac: document.getElementById('enable_idrac').checked,
         idrac: {
-            ip:   document.getElementById('idrac_ip').value,
-            user: document.getElementById('idrac_user').value,
+            ip:   document.getElementById('idrac_ip').value.trim(),
+            user: document.getElementById('idrac_user').value.trim(),
             pass: document.getElementById('idrac_pass').value,
         },
 
@@ -202,24 +218,32 @@ async function guardarConfiguracion() {
 
         enabled_vms: document.getElementById('enable_vms').checked,
         vms: vms,
+
+        enabled_mirth: document.getElementById('enable_mirth').checked, // NUEVO v4.1
+        mirth_servers: mirth_servers                                   // NUEVO v4.1
     };
 
     try {
         const res = await eel.guardar_config(config)();
+        
+        // Simular tiempo de guardado para feedback visual
         setTimeout(() => {
-            btn.disabled  = false;
+            btn.disabled = false;
             btn.innerHTML = originalText;
+            
             if (res.success) {
-                bloquearBotonMonitoreo(30);
-                alert("✅ Configuración guardada.\nEl servicio se está reiniciando para aplicar los cambios.");
+                // Bloqueamos el botón de monitoreo 30s mientras el servicio reinicia
+                bloquearBotonMonitoreo(30); 
+                alert("✅ Configuración guardada correctamente.\nEl servicio se está reiniciando para aplicar los cambios.");
             } else {
                 alert("❌ Error al guardar: " + res.msg);
             }
         }, 1000);
+
     } catch (e) {
-        btn.disabled  = false;
+        btn.disabled = false;
         btn.innerHTML = originalText;
-        alert("Error de comunicación con Python: " + e);
+        alert("Error de comunicación con el motor Python: " + e);
     }
 }
 
@@ -512,5 +536,67 @@ async function limpiarConsola() {
     if (res) {
         document.getElementById('log_console').innerText = "--- Log limpiado por el usuario ---";
         logPosition = 0;
+    }
+}
+
+function agregarMirth(data = null) {
+    const container = document.getElementById('mirth_list');
+    const id        = Date.now();
+    const aliasVal  = data?.alias || "";
+
+    const html = `
+    <div class="card p-3 mb-3 border bg-light mirth-card" id="mirth_${id}">
+        <div class="d-flex justify-content-between mb-2">
+            <h6 class="fw-bold text-success mb-0"><i class="fas fa-server me-2"></i>Mirth: ${aliasVal || "Nuevo"}</h6>
+            <button class="btn btn-sm btn-outline-danger" onclick="document.getElementById('mirth_${id}').remove()">
+                <i class="fas fa-trash"></i> Quitar
+            </button>
+        </div>
+        <div class="row g-2">
+            <div class="col-md-3">
+                <label class="form-label text-muted small fw-bold">Alias / Entorno</label>
+                <input type="text" class="form-control mirth-alias border-success" placeholder="Ej: Produccion_Principal" value="${aliasVal}">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label text-muted small fw-bold">URL API (HTTPS)</label>
+                <input type="text" class="form-control mirth-url" placeholder="https://192.168.x.x:8443" value="${data?.url || ''}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label text-muted small fw-bold">Usuario</label>
+                <input type="text" class="form-control mirth-user" placeholder="admin" value="${data?.user || ''}">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label text-muted small fw-bold">Contraseña</label>
+                <div class="input-group">
+                    <input type="password" class="form-control mirth-pass" value="${data?.pass || ''}">
+                    <button class="btn btn-warning text-white" onclick="testMirth(this)"><i class="fas fa-plug"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>`;
+    container.insertAdjacentHTML('beforeend', html);
+}
+
+async function testMirth(btnElement) {
+    const card = btnElement.closest('.mirth-card');
+    const data = {
+        url:  card.querySelector('.mirth-url').value,
+        user: card.querySelector('.mirth-user').value,
+        pass: card.querySelector('.mirth-pass').value,
+    };
+    
+    const originalHtml = btnElement.innerHTML;
+    btnElement.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    btnElement.disabled  = true;
+
+    try {
+        const res = await eel.test_mirth_gui(data)();
+        btnElement.innerHTML = originalHtml;
+        btnElement.disabled  = false;
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        btnElement.innerHTML = originalHtml;
+        btnElement.disabled  = false;
+        alert("Error de comunicación: " + e);
     }
 }

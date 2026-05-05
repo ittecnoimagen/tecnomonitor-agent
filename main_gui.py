@@ -70,6 +70,12 @@ def _desencriptar_config(data: dict) -> dict:
             if isinstance(vm, dict) and vm.get("pass"):
                 vm["pass"] = security.desencriptar(vm["pass"])
 
+    # --- NUEVO: Desencriptar Mirth Connect ---
+    if isinstance(data.get("mirth_servers"), list):
+        for m in data["mirth_servers"]:
+            if isinstance(m, dict) and m.get("pass"):
+                m["pass"] = security.desencriptar(m["pass"])
+
     return data
 
 
@@ -105,6 +111,12 @@ def guardar_config(config: dict):
             for vm in config["vms"]:
                 if isinstance(vm, dict) and vm.get("pass"):
                     vm["pass"] = security.encriptar(vm["pass"])
+
+        # --- NUEVO: Encriptar Mirth Connect ---
+        if isinstance(config.get("mirth_servers"), list):
+            for m in config["mirth_servers"]:
+                if isinstance(m, dict) and m.get("pass"):
+                    m["pass"] = security.encriptar(m["pass"])
 
         # Escritura atómica del JSON
         tmp = CONFIG_FILE + ".tmp"
@@ -215,6 +227,12 @@ def test_idrac_gui(data):
 @eel.expose
 def test_vm_gui(data):
     return agent_logic.test_connection_vm_wmi(data)
+
+
+# --- NUEVO: Test Mirth Connect ---
+@eel.expose
+def test_mirth_gui(data):
+    return agent_logic.test_connection_mirth(data)
 
 
 @eel.expose

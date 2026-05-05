@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_COMPLETED
 from requests.auth import HTTPBasicAuth
 import security
+import psutil
 
 # ---------------------------------------------------------------------------
 # RUTAS Y CONSTANTES
@@ -272,7 +273,6 @@ def test_connection_proxmox(config):
         return {"success": False, "msg": f"Credenciales inválidas (HTTP {r.status_code})"}
     except Exception as e:
         return {"success": False, "msg": str(e)}
-
 
 def obtener_physical_layer(config):
     host = config.get("host") or config.get("ip")
@@ -798,6 +798,64 @@ def obtener_vm_data(args):
 
     return resultado_holder[0]
 
+# ---------------------------------------------------------------------------
+# NETWORK / INTERNET HEALTH (PASIVO + LATENCIA)
+# ---------------------------------------------------------------------------
+def obtener_salud_red_pasiva(host_nube="tecnomonitor.tecnoimagen.com.ar", puerto=443, log_func=None):
+    """
+    Mide el uso real de la placa de red en el último segundo y calcula la latencia
+    TCP hacia el servidor en la nube sin saturar el ancho de banda.
+    """
+    try:
+        # 1. Medición Pasiva de Tráfico (Velocidad actual en la placa de red)
+        io_inicio = psutil.net_io_counters()
+        time.sleep(1.0)  # Tomamos una muestra exacta de 1 segundo
+        io_fin = psutil.net_io_counters()
+        
+        # Calculamos Megabits por segundo (Mbps)
+        # 1 Byte = 8 bits. Dividimos por 1.000.000 para obtener Megabits decimales.
+        bajada_actual_mbps = round((io_fin.bytes_recv - io_inicio.bytes_recv) * 8 / 1_000_000, 2)
+        subida_actual_mbps = round((io_fin.bytes_sent - io_inicio.bytes_sent) * 8 / 1_000_000, 2)
+        
+        # 2. Medición de Latencia a la Nube (TCP Ping)
+        latencia_ms = -1
+        estado_nube = "inaccesible"
+        inicio_ping = time.time()
+        
+        try:
+            # Intentamos un "saludo" TCP ligero al puerto 443
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3.0)  # Si tarda más de 3 segundos, asumimos red colapsada
+            s.connect((host_nube, puerto))
+            s.close()
+            
+            latencia_ms = round((time.time() - inicio_ping) * 1000, 2)
+            estado_nube = "conectado"
+        except Exception as e:
+            if log_func:
+                log_func(f"⚠️ Alerta de red: No se pudo alcanzar la nube ({host_nube}): {e}")
+
+        # Log visual para la consola de monitoreo
+        if log_func:
+            log_func(f"🌐 Tráfico actual: Subida {subida_actual_mbps} Mbps | Latencia Cloud: {latencia_ms} ms")
+
+        return {
+            "status": "ok",
+            "upload_usage_mbps": subida_actual_mbps,
+            "download_usage_mbps": bajada_actual_mbps,
+            "cloud_latency_ms": latencia_ms,
+            "cloud_status": estado_nube,
+            "last_check": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        if log_func:
+            log_func(f"❌ Error crítico leyendo red pasiva: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "last_check": datetime.now().isoformat()
+        }
 
 # ---------------------------------------------------------------------------
 # CICLO PRINCIPAL DEL AGENTE
@@ -805,41 +863,37 @@ def obtener_vm_data(args):
 def ejecutar_ciclo_agente(config, log_callback=None):
     """
     Recolecta todos los módulos habilitados, construye el envelope y lo envía.
-    Incluye collection_meta para que el servidor distinga módulos desactivados
-    de módulos con error.
-    El checkpoint SQL se guarda SOLO si el POST es exitoso.
+    Incluye collection_meta para que el servidor distinga módulos desactivados.
     """
-
     collection_meta = {
         "proxmox": {"enabled": config.get("enabled_proxmox", False), "status": "disabled"},
         "idrac":   {"enabled": config.get("enabled_idrac",   False), "status": "disabled"},
         "wmi":     {"enabled": config.get("enabled_vms",     False), "status": "disabled"},
         "sql":     {"enabled": config.get("enabled_sql",     False), "status": "disabled"},
+        "mirth":   {"enabled": config.get("enabled_mirth",   False), "status": "disabled"},
     }
 
     reporte = {
         "envelope": {
-            "schema_version": "4.1",
-            "agent_version":  "4.1",
+            "schema_version": "4.2",
+            "agent_version":  "4.2",
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },
         "collection_meta":  collection_meta,
+        "software_monitoring": {},
         "physical_layer":   {},
         "virtual_layer":    [],
     }
 
-    # --- Capa física: Proxmox o VMware ---
+    # --- 1. Capa física: Proxmox o VMware ---
     if config.get("enabled_proxmox"):
         hyper_cfg  = config.get("proxmox", {})
         hyper_type = hyper_cfg.get("type", "proxmox")
         try:
             if hyper_type == "vmware":
-                data = obtener_vmware_layer(hyper_cfg, log_func=log_callback)
-                reporte["physical_layer"] = data
-                # Las VMs de VMware se incorporan al virtual_layer
-                for vm_vm in data.pop("vms", []):
-                    reporte["virtual_layer"].append(vm_vm)
+                # Sobrescribe la capa física con la estructura base del host
+                reporte["physical_layer"] = obtener_vmware_layer(hyper_cfg, log_func=log_callback)
             else:
                 reporte["physical_layer"] = obtener_physical_layer(hyper_cfg)
 
@@ -850,21 +904,35 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             if log_callback:
                 log_callback(f"❌ Error capa física ({hyper_type}): {e}")
 
-        # iDRAC solo tiene sentido sobre hardware físico (Proxmox/bare-metal)
-        if config.get("enabled_idrac") and hyper_type != "vmware":
-            try:
-                reporte["physical_layer"]["sensors"]       = obtener_sensors_idrac(config["idrac"])
-                reporte["physical_layer"]["storage_layer"] = obtener_storage_fisico_v3(config["idrac"], log_callback)
-                collection_meta["idrac"]["status"] = "ok"
-                if not reporte["physical_layer"]["storage_layer"].get("collection_complete"):
-                    collection_meta["idrac"]["status"] = "partial"
-            except Exception as e:
-                collection_meta["idrac"]["status"] = "error"
-                collection_meta["idrac"]["error"]  = str(e)
-                if log_callback:
-                    log_callback(f"❌ Error iDRAC: {e}")
+    # --- 2. Capa física: iDRAC (Sensores y Storage) ---
+    if config.get("enabled_idrac"):
+        idrac_cfg = config.get("idrac", {})
+        try:
+            # Aseguramos que la llave exista por si VMware falló o está apagado
+            if "physical_layer" not in reporte or not reporte["physical_layer"]:
+                reporte["physical_layer"] = {"host_info": {}, "telemetry": {}}
 
-    # --- Capa virtual: VMs/WS via WMI ---
+            reporte["physical_layer"]["sensors"] = obtener_sensors_idrac(idrac_cfg)
+            reporte["physical_layer"]["storage"] = obtener_storage_fisico_v3(idrac_cfg, log_callback)
+            collection_meta["idrac"]["status"] = "ok"
+        except Exception as e:
+            collection_meta["idrac"]["status"] = "error"
+            collection_meta["idrac"]["error"] = str(e)
+            if log_callback:
+                log_callback(f"❌ Error iDRAC: {e}")
+
+    # --- 3. Capa Física: Network & Latency ---
+    if "physical_layer" not in reporte:
+        reporte["physical_layer"] = {}
+        
+    # Agregamos la salud de red sin pisar lo que trajo VMware e iDRAC
+    reporte["physical_layer"]["network_health"] = obtener_salud_red_pasiva(
+        host_nube="tecnomonitor.tecnoimagen.com.ar", 
+        puerto=443,
+        log_func=log_callback
+    )
+
+    # --- 4. Capa virtual: VMs/WS via WMI ---
     if config.get("enabled_vms") and config.get("vms"):
         try:
             with ThreadPoolExecutor(max_workers=5) as ex:
@@ -883,7 +951,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             if log_callback:
                 log_callback(f"❌ Error capa WMI: {e}")
 
-    # --- Métricas SQL ---
+    # --- 5. Métricas SQL ---
     if "_sql_data_payload" in config:
         payload = config["_sql_data_payload"]
         reporte["application_metrics"] = payload.get("application_metrics", payload)
@@ -891,7 +959,15 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["sql"]["block_start"] = payload.get("application_metrics", {}).get("start_time_extraction", "")
         collection_meta["sql"]["block_end"]   = payload.get("application_metrics", {}).get("end_time_extraction", "")
 
-    # --- Envío al servidor central ---
+    # --- 6. Software Monitoring: Mirth Connect ---
+    if config.get("enabled_mirth") and config.get("mirth_servers"):
+        mirth_data, m_status, m_errors = obtener_datos_mirth(config["mirth_servers"], log_callback)
+        reporte["software_monitoring"]["mirth"] = mirth_data
+        collection_meta["mirth"]["status"] = m_status
+        collection_meta["mirth"]["total"]  = len(config["mirth_servers"])
+        collection_meta["mirth"]["errors"] = m_errors
+
+    # --- 7. Envío al servidor central ---
     try:
         r = requests.post(
             config.get("central_url"),
@@ -918,3 +994,122 @@ def ejecutar_ciclo_agente(config, log_callback=None):
             "error":     str(e),
             "timestamp": datetime.now().strftime("%H:%M:%S"),
         }
+
+# ---------------------------------------------------------------------------
+# MIRTH CONNECT
+# ---------------------------------------------------------------------------
+def test_connection_mirth(config):
+    url = config.get("url", "").rstrip('/')
+    try:
+        s = requests.Session()
+        s.headers.update({'X-Requested-With': 'OpenAPI', 'Accept': 'application/json'})
+        r = s.post(f"{url}/api/users/_login", data={'username': config.get("user", ""), 'password': config.get("pass", "")}, verify=False, timeout=5)
+        
+        if r.status_code == 200:
+            s.post(f"{url}/api/users/_logout", verify=False, timeout=2)
+            return {"success": True, "msg": "Conexión a Mirth Connect OK"}
+        return {"success": False, "msg": f"Credenciales inválidas (HTTP {r.status_code})"}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
+
+def obtener_datos_mirth(mirth_configs, log_func=None):
+    """
+    Extrae la telemetría completa de canales HL7 desde la API REST de Mirth Connect.
+    Incluye: recibidos, enviados, en cola y alertas de error.
+    """
+    resultados = {}
+    meta_status = "ok"
+    errores_globales = 0
+
+    for m_cfg in mirth_configs:
+        alias = m_cfg.get("alias", "Mirth_Desconocido")
+        url   = m_cfg.get("url", "").rstrip('/')
+        user  = m_cfg.get("user", "")
+        pwd   = m_cfg.get("pass", "")
+        
+        canales_data = []
+        try:
+            s = requests.Session()
+            # Encabezados requeridos por la API de Mirth para evitar bloqueos
+            s.headers.update({
+                'X-Requested-With': 'OpenAPI', 
+                'Accept': 'application/json'
+            })
+            
+            # 1. Autenticación
+            login_req = s.post(
+                f"{url}/api/users/_login", 
+                data={'username': user, 'password': pwd}, 
+                verify=False, 
+                timeout=10
+            )
+            login_req.raise_for_status()
+            
+            # 2. Extracción de estados y estadísticas
+            r_stat = s.get(f"{url}/api/channels/statuses", verify=False, timeout=15)
+            r_stat.raise_for_status()
+            data = r_stat.json()
+            
+            # Mirth puede devolver un objeto único o una lista; normalizamos a lista
+            dash_status = data.get('list', {}).get('dashboardStatus', [])
+            if isinstance(dash_status, dict): 
+                dash_status = [dash_status]
+            
+            for status in dash_status:
+                name  = status.get('name', 'Unknown')
+                state = status.get('state', 'UNKNOWN')
+                
+                # Navegamos la estructura interna de estadísticas de Mirth
+                stats_entries = status.get('statistics', {}).get('entry', [])
+                if isinstance(stats_entries, dict): 
+                    stats_entries = [stats_entries]
+                
+                # Inicializamos contadores para este canal
+                queued   = 0
+                sent     = 0
+                received = 0
+                errors_count = 0
+                
+                for entry in stats_entries:
+                    st_type = entry.get('com.mirth.connect.donkey.model.message.Status')
+                    st_val  = int(entry.get('long', 0))
+                    
+                    if st_type == 'QUEUED':     queued = st_val
+                    elif st_type == 'SENT':     sent = st_val
+                    elif st_type == 'RECEIVED': received = st_val
+                    elif st_type == 'ERROR':    errors_count = st_val
+                
+                # Construimos el objeto del canal con la métrica completa
+                canales_data.append({
+                    "channel":    name,
+                    "status":     state,
+                    "received":   received,
+                    "sent":       sent,
+                    "queued":     queued,
+                    "last_error": f"{errors_count} errores detectados" if errors_count > 0 else ""
+                })
+            
+            # 3. Cierre de sesión por seguridad
+            s.post(f"{url}/api/users/_logout", verify=False, timeout=5)
+            resultados[alias] = canales_data
+            
+        except Exception as e:
+            errores_globales += 1
+            meta_status = "partial"
+            if log_func: 
+                log_func(f"⚠️ Error Mirth ({alias}): {str(e)}")
+            
+            # Devolvemos un canal de error para que el servidor sepa por qué no hay datos
+            resultados[alias] = [{
+                "channel": "ERROR_CONEXION", 
+                "status": "OFFLINE", 
+                "received": 0, "sent": 0, "queued": 0, 
+                "last_error": str(e)
+            }]
+    
+    # Si fallaron todos los servidores configurados, el estado es Error total
+    if errores_globales == len(mirth_configs) and len(mirth_configs) > 0:
+        meta_status = "error"
+        
+    return resultados, meta_status, errores_globales
+

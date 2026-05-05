@@ -95,6 +95,13 @@ def cargar_config_segura():
                 if isinstance(vm, dict) and vm.get("pass"):
                     vm["pass"] = security.desencriptar(vm["pass"])
 
+        # --- AÑADE ESTO: Desencriptar Mirth Connect ---
+        if isinstance(data.get("mirth_servers"), list):
+            for m in data["mirth_servers"]:
+                if isinstance(m, dict) and m.get("pass"):
+                    m["pass"] = security.desencriptar(m["pass"])
+        # ----------------------------------------------
+
         return data
 
     except json.JSONDecodeError as e:
