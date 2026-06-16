@@ -5,6 +5,7 @@ print("--- DIAGNOSTICO: PSUTIL (KERNEL DIRECTO) ---")
 print("Genera carga en el disco AHORA...")
 print("-" * 50)
 
+
 # Buscamos el disco físico donde está C:
 # Generalmente es PhysicalDrive0
 disco_objetivo = "PhysicalDrive0"
