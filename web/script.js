@@ -148,6 +148,17 @@ async function cargarConfiguracion() {
             cfg.mirth_servers.forEach(m => agregarMirth(m));
         }
 
+        // --- 7. Certificados SSL --- (NUEVO v4.2)
+        const chkSsl = document.getElementById('enable_ssl');
+        chkSsl.checked = !!cfg.enabled_ssl;
+        toggleCard('ssl_body', chkSsl);
+
+        const sslContainer = document.getElementById('ssl_list');
+        sslContainer.innerHTML = '';
+        if (cfg.ssl_urls && cfg.ssl_urls.length > 0) {
+            cfg.ssl_urls.forEach(urlObj => agregarSSL(urlObj));
+        }
+
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
     }
@@ -180,6 +191,14 @@ async function guardarConfiguracion() {
             url:   card.querySelector('.mirth-url').value.trim(),
             user:  card.querySelector('.mirth-user').value.trim(),
             pass:  card.querySelector('.mirth-pass').value,
+        });
+    });
+
+    // --- Recolectar lista de SSL --- (NUEVO v4.2)
+    const ssl_urls = [];
+    document.querySelectorAll('.ssl-card').forEach(card => {
+        ssl_urls.push({
+            url: card.querySelector('.ssl-url').value.trim()
         });
     });
 
@@ -220,7 +239,10 @@ async function guardarConfiguracion() {
         vms: vms,
 
         enabled_mirth: document.getElementById('enable_mirth').checked, // NUEVO v4.1
-        mirth_servers: mirth_servers                                   // NUEVO v4.1
+        mirth_servers: mirth_servers,                                   // NUEVO v4.1
+
+        enabled_ssl: document.getElementById('enable_ssl').checked,
+        ssl_urls: ssl_urls
     };
 
     try {
@@ -600,3 +622,57 @@ async function testMirth(btnElement) {
         alert("Error de comunicación: " + e);
     }
 }
+
+// ---------------------------------------------------------------------------
+// GESTION SSL
+// ---------------------------------------------------------------------------
+function agregarSSL(data = null) {
+    const container = document.getElementById('ssl_list');
+    const id        = Date.now();
+    const urlVal    = data?.url || "";
+
+    const html = `
+    <div class="card p-2 mb-2 border bg-light ssl-card" id="ssl_${id}">
+        <div class="row g-2 align-items-center">
+            <div class="col-md-8">
+                <input type="text" class="form-control ssl-url border-primary" 
+                       placeholder="https://pacs.hospital.com" value="${urlVal}">
+            </div>
+            <div class="col-md-4 d-flex justify-content-end gap-2">
+                <button class="btn btn-warning text-white btn-sm" onclick="testSSL(this)" title="Probar conexión">
+                    <i class="fas fa-plug"></i> Test
+                </button>
+                <button class="btn btn-outline-danger btn-sm" onclick="document.getElementById('ssl_${id}').remove()">
+                    <i class="fas fa-trash"></i>
+                </button>
+            </div>
+        </div>
+    </div>`;
+    container.insertAdjacentHTML('beforeend', html);
+}
+
+async function testSSL(btnElement) {
+    const card = btnElement.closest('.ssl-card');
+    const url  = card.querySelector('.ssl-url').value.trim();
+    
+    if (!url) {
+        alert("⚠️ Ingresá una URL válida primero.");
+        return;
+    }
+
+    const originalHtml = btnElement.innerHTML;
+    btnElement.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    btnElement.disabled  = true;
+
+    try {
+        const res = await eel.test_ssl_gui({url: url})();
+        btnElement.innerHTML = originalHtml;
+        btnElement.disabled  = false;
+        alert(res.success ? `${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        btnElement.innerHTML = originalHtml;
+        btnElement.disabled  = false;
+        alert("Error de comunicación con Python: " + e);
+    }
+}
+

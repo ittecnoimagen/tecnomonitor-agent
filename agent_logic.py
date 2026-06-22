@@ -13,6 +13,12 @@ from concurrent.futures import ThreadPoolExecutor, wait as futures_wait, FIRST_C
 from requests.auth import HTTPBasicAuth
 import security
 import psutil
+import mirth_collector
+import ssl
+import socket
+from urllib.parse import urlparse
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 
 # ---------------------------------------------------------------------------
 # RUTAS Y CONSTANTES
@@ -519,14 +525,15 @@ def obtener_sensors_idrac(config):
         sensors["status"] = f"error: {str(e)}"
     return sensors
 
-
 def obtener_storage_fisico_v3(config, log_func=None):
     """
-    Recorre la API Redfish de iDRAC de forma secuencial con timeout global de 60s.
-    Agrega collection_complete para que el servidor sepa si los datos son parciales.
+    Recorre la API Redfish de iDRAC de forma PARALELA.
+    Evita alcanzar el timeout global de 60s en servidores de PACS con múltiples arreglos RAID.
     """
+    import concurrent.futures
+
     if log_func:
-        log_func(f"📦 Recolectando Storage iDRAC (RAID): {config.get('ip')}")
+        log_func(f"📦 Recolectando Storage iDRAC (RAID) Concurrente: {config.get('ip')}")
 
     storage_data = {
         "controllers":      [],
@@ -535,77 +542,96 @@ def obtener_storage_fisico_v3(config, log_func=None):
         "collection_complete": False,
     }
 
-    deadline = time.time() + 60          # timeout global de 60 segundos
+    auth = HTTPBasicAuth(config.get('user'), config.get('pass'))
+    base_url = f"https://{config['ip']}/redfish/v1/Systems/System.Embedded.1/Storage"
 
     try:
-        auth     = HTTPBasicAuth(config.get('user'), config.get('pass'))
-        base_url = f"https://{config['ip']}/redfish/v1/Systems/System.Embedded.1/Storage"
-
         r_store = requests.get(base_url, auth=auth, verify=False, timeout=8)
         if r_store.status_code != 200:
             return storage_data
 
         members = r_store.json().get("Members", [])
-        for m in members:
-            if time.time() > deadline:
-                if log_func:
-                    log_func("⚠️ iDRAC Storage: timeout global alcanzado, datos parciales")
-                return storage_data
+        
+        # Funciones auxiliares para hilos paralelos
+        def fetch_controller(m):
+            try:
+                return requests.get(f"https://{config['ip']}{m['@odata.id']}", auth=auth, verify=False, timeout=10).json()
+            except Exception:
+                return None
 
-            r_ctrl = requests.get(f"https://{config['ip']}{m['@odata.id']}", auth=auth, verify=False, timeout=5)
-            if r_ctrl.status_code != 200:
-                continue
+        def fetch_volume(v_url):
+            try:
+                return requests.get(f"https://{config['ip']}{v_url}", auth=auth, verify=False, timeout=10).json()
+            except Exception:
+                return None
 
-            c         = r_ctrl.json()
+        def fetch_drive(d_url):
+            try:
+                return requests.get(f"https://{config['ip']}{d_url}", auth=auth, verify=False, timeout=10).json()
+            except Exception:
+                return None
+
+        # 1. Obtener Controladoras en paralelo
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            controllers_raw = list(executor.map(fetch_controller, members))
+
+        volumes_urls = []
+        drives_urls = []
+
+        for c in controllers_raw:
+            if not c: continue
+            
             ctrl_name = c.get("Id", "Unknown Controller")
-            status    = c.get("Status", {}).get("Health", "Unknown")
             storage_data["controllers"].append({
                 "name":   ctrl_name,
-                "status": status,
+                "status": c.get("Status", {}).get("Health", "Unknown"),
                 "model":  c.get("Summary", {}).get("Model", "Dell PERC"),
             })
 
-            # Volúmenes lógicos
-            v_disks_url = f"https://{config['ip']}{m['@odata.id']}/Volumes"
-            r_vd = requests.get(v_disks_url, auth=auth, verify=False, timeout=5)
-            if r_vd.status_code == 200:
-                for v in r_vd.json().get("Members", []):
-                    if time.time() > deadline:
-                        return storage_data
-                    r_v_info = requests.get(f"https://{config['ip']}{v['@odata.id']}", auth=auth, verify=False, timeout=5)
-                    if r_v_info.status_code == 200:
-                        vd = r_v_info.json()
-                        storage_data["logical_volumes"].append({
-                            "name":       vd.get("Name"),
-                            "raid_level": vd.get("VolumeType"),
-                            "size_gb":    round(safe_int(vd.get("CapacityBytes")) / 1073741824, 2),
-                            "status":     vd.get("Status", {}).get("Health", "Unknown"),
-                        })
-
-            # Discos físicos
+            # Extraer URLs para el siguiente paso
+            if "Volumes" in c:
+                # Requiere otra petición para ver los miembros del volumen, la hacemos síncrona por simplicidad
+                v_disks_url = f"https://{config['ip']}{c['@odata.id']}/Volumes"
+                r_vd = requests.get(v_disks_url, auth=auth, verify=False, timeout=5)
+                if r_vd.status_code == 200:
+                    for v in r_vd.json().get("Members", []):
+                        volumes_urls.append(v['@odata.id'])
+            
             for d in c.get("Drives", []):
-                if time.time() > deadline:
-                    return storage_data
-                r_d_info = requests.get(f"https://{config['ip']}{d['@odata.id']}", auth=auth, verify=False, timeout=5)
-                if r_d_info.status_code == 200:
-                    drive = r_d_info.json()
-                    storage_data["physical_drives"].append({
-                        "slot":       drive.get("Id"),
-                        "model":      drive.get("Model"),
-                        "size_gb":    round(safe_int(drive.get("CapacityBytes")) / 1073741824, 2),
-                        "media_type": drive.get("MediaType"),
-                        "status":     drive.get("Status", {}).get("Health", "Unknown"),
-                    })
+                drives_urls.append(d['@odata.id'])
+
+        # 2. Obtener Volúmenes Lógicos y Discos Físicos en paralelo
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            volumes_raw = list(executor.map(fetch_volume, volumes_urls))
+            drives_raw = list(executor.map(fetch_drive, drives_urls))
+
+        for vd in volumes_raw:
+            if vd:
+                storage_data["logical_volumes"].append({
+                    "name":       vd.get("Name"),
+                    "raid_level": vd.get("VolumeType"),
+                    "size_gb":    round(safe_int(vd.get("CapacityBytes")) / 1073741824, 2),
+                    "status":     vd.get("Status", {}).get("Health", "Unknown"),
+                })
+
+        for drive in drives_raw:
+            if drive:
+                storage_data["physical_drives"].append({
+                    "slot":       drive.get("Id"),
+                    "model":      drive.get("Model"),
+                    "size_gb":    round(safe_int(drive.get("CapacityBytes")) / 1073741824, 2),
+                    "media_type": drive.get("MediaType"),
+                    "status":     drive.get("Status", {}).get("Health", "Unknown"),
+                })
 
         storage_data["collection_complete"] = True
 
     except Exception as e:
         if log_func:
-            log_func(f"❌ Error RAID iDRAC: {e}")
+            log_func(f"❌ Error RAID iDRAC Concurrente: {e}")
         storage_data["error"] = str(e)
 
     return storage_data
-
 
 # ---------------------------------------------------------------------------
 # WMI — VMs y Workstations
@@ -858,6 +884,131 @@ def obtener_salud_red_pasiva(host_nube="tecnomonitor.tecnoimagen.com.ar", puerto
         }
 
 # ---------------------------------------------------------------------------
+# MONITOREO DE CERTIFICADOS SSL
+# ---------------------------------------------------------------------------
+def test_ssl_gui(data):
+    """Función de prueba rápida para la interfaz gráfica."""
+    url_str = data.get("url", "").strip()
+    if not url_str:
+        return {"success": False, "msg": "URL vacía"}
+    
+    try:
+        parsed = urlparse(url_str)
+        host = parsed.hostname or url_str.replace("https://", "").replace("http://", "").split("/")[0]
+        port = parsed.port or 443
+
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE  # Lo leemos aunque esté vencido
+
+        with socket.create_connection((host, port), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
+                
+                # Pedimos el certificado en formato binario crudo (DER)
+                cert_der = ssock.getpeercert(binary_form=True)
+                if not cert_der:
+                    return {"success": False, "msg": "El servidor no devolvió un certificado."}
+                
+                # Lo parseamos con la librería cryptography (ya instalada en el agente)
+                cert = x509.load_der_x509_certificate(cert_der, default_backend())
+                
+                # cert.not_valid_after nos da un datetime en UTC
+                expire_date = cert.not_valid_after
+                days = (expire_date - datetime.utcnow()).days
+                
+                estado = "✅ Válido" if days > 30 else "⚠️ Próximo a vencer" if days > 0 else "❌ Vencido"
+                return {"success": True, "msg": f"{estado} (Expira en {days} días)"}
+                
+    except Exception as e:
+        return {"success": False, "msg": f"Error de conexión: {str(e)}"}
+
+def obtener_certificados_ssl(ssl_configs, log_func=None):
+    """
+    Extrae las fechas de expiración de una lista de URLs leyendo el certificado 
+    en formato binario crudo (DER) para evitar validaciones nativas de Python.
+    """
+    resultados = []
+    meta_status = "ok"
+    errores_globales = 0
+
+    for item in ssl_configs:
+        url_str = item.get("url", "").strip()
+        if not url_str: 
+            continue
+
+        try:
+            # Parsear la URL para obtener el host y el puerto
+            parsed = urlparse(url_str)
+            host = parsed.hostname or url_str.replace("https://", "").replace("http://", "").split("/")[0]
+            port = parsed.port or 443
+
+            # Configurar el contexto SSL para que no valide la cadena de confianza
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            with socket.create_connection((host, port), timeout=5) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as ssock:
+                    
+                    # Pedir el certificado en formato binario (DER)
+                    cert_der = ssock.getpeercert(binary_form=True)
+                    if not cert_der:
+                        raise Exception("El servidor no presentó un certificado SSL/TLS.")
+
+                    # Parsear el certificado usando la librería cryptography
+                    cert = x509.load_der_x509_certificate(cert_der, default_backend())
+                    
+                    # Calcular días restantes
+                    expire_date = cert.not_valid_after
+                    days_remaining = (expire_date - datetime.utcnow()).days
+
+                    # Clasificación semafórica del estado
+                    if days_remaining < 0:
+                        status = "CRITICAL" # Vencido
+                    elif days_remaining < 7:
+                        status = "CRITICAL" # Menos de una semana
+                    elif days_remaining < 30:
+                        status = "WARNING"  # Menos de un mes
+                    else:
+                        status = "OK"       # Saludable
+
+                    # Extraer el Emisor (Issuer) buscando la Organización o el Common Name
+                    issuer = "Desconocido"
+                    for attribute in cert.issuer:
+                        if attribute.oid == x509.oid.NameOID.ORGANIZATION_NAME or attribute.oid == x509.oid.NameOID.COMMON_NAME:
+                            issuer = attribute.value
+                            break
+
+                    # Guardar el resultado exitoso
+                    resultados.append({
+                        "url": url_str,
+                        "status": status,
+                        "expiration_date": expire_date.isoformat() + "Z",
+                        "days_remaining": days_remaining,
+                        "issuer": issuer
+                    })
+                    
+        except Exception as e:
+            errores_globales += 1
+            if log_func:
+                log_func(f"⚠️ Error SSL ({url_str}): {e}")
+            
+            # Guardar el resultado de error para el servidor
+            resultados.append({
+                "url": url_str,
+                "status": "ERROR",
+                "last_error": str(e)[:100]
+            })
+
+    # Actualizar estado del meta-bloque
+    if errores_globales > 0:
+        meta_status = "partial"
+    if errores_globales == len(ssl_configs) and len(ssl_configs) > 0:
+        meta_status = "error"
+
+    return resultados, meta_status, errores_globales
+
+# ---------------------------------------------------------------------------
 # CICLO PRINCIPAL DEL AGENTE
 # ---------------------------------------------------------------------------
 def ejecutar_ciclo_agente(config, log_callback=None):
@@ -871,6 +1022,7 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "wmi":     {"enabled": config.get("enabled_vms",     False), "status": "disabled"},
         "sql":     {"enabled": config.get("enabled_sql",     False), "status": "disabled"},
         "mirth":   {"enabled": config.get("enabled_mirth",   False), "status": "disabled"},
+        "ssl_monitoring": {"enabled": config.get("enabled_ssl", False), "status": "disabled"}, # NUEVO
     }
 
     reporte = {
@@ -961,11 +1113,20 @@ def ejecutar_ciclo_agente(config, log_callback=None):
 
     # --- 6. Software Monitoring: Mirth Connect ---
     if config.get("enabled_mirth") and config.get("mirth_servers"):
-        mirth_data, m_status, m_errors = obtener_datos_mirth(config["mirth_servers"], log_callback)
+        # CAMBIO AQUÍ: Llamamos a mirth_collector en lugar de la función local
+        mirth_data, m_status, m_errors = mirth_collector.recolectar_mirth(config["mirth_servers"], log_callback)
         reporte["software_monitoring"]["mirth"] = mirth_data
         collection_meta["mirth"]["status"] = m_status
         collection_meta["mirth"]["total"]  = len(config["mirth_servers"])
         collection_meta["mirth"]["errors"] = m_errors
+
+    # --- 6.5. Software Monitoring: Certificados SSL ---
+    if config.get("enabled_ssl") and config.get("ssl_urls"):
+        ssl_data, ssl_status, ssl_errors = obtener_certificados_ssl(config["ssl_urls"], log_callback)
+        reporte["software_monitoring"]["ssl_certificates"] = ssl_data
+        collection_meta["ssl_monitoring"]["status"] = ssl_status
+        collection_meta["ssl_monitoring"]["total"] = len(config["ssl_urls"])
+        collection_meta["ssl_monitoring"]["errors"] = ssl_errors
 
     # --- 7. Envío al servidor central ---
     try:
@@ -1011,105 +1172,3 @@ def test_connection_mirth(config):
         return {"success": False, "msg": f"Credenciales inválidas (HTTP {r.status_code})"}
     except Exception as e:
         return {"success": False, "msg": str(e)}
-
-def obtener_datos_mirth(mirth_configs, log_func=None):
-    """
-    Extrae la telemetría completa de canales HL7 desde la API REST de Mirth Connect.
-    Incluye: recibidos, enviados, en cola y alertas de error.
-    """
-    resultados = {}
-    meta_status = "ok"
-    errores_globales = 0
-
-    for m_cfg in mirth_configs:
-        alias = m_cfg.get("alias", "Mirth_Desconocido")
-        url   = m_cfg.get("url", "").rstrip('/')
-        user  = m_cfg.get("user", "")
-        pwd   = m_cfg.get("pass", "")
-        
-        canales_data = []
-        try:
-            s = requests.Session()
-            # Encabezados requeridos por la API de Mirth para evitar bloqueos
-            s.headers.update({
-                'X-Requested-With': 'OpenAPI', 
-                'Accept': 'application/json'
-            })
-            
-            # 1. Autenticación
-            login_req = s.post(
-                f"{url}/api/users/_login", 
-                data={'username': user, 'password': pwd}, 
-                verify=False, 
-                timeout=10
-            )
-            login_req.raise_for_status()
-            
-            # 2. Extracción de estados y estadísticas
-            r_stat = s.get(f"{url}/api/channels/statuses", verify=False, timeout=15)
-            r_stat.raise_for_status()
-            data = r_stat.json()
-            
-            # Mirth puede devolver un objeto único o una lista; normalizamos a lista
-            dash_status = data.get('list', {}).get('dashboardStatus', [])
-            if isinstance(dash_status, dict): 
-                dash_status = [dash_status]
-            
-            for status in dash_status:
-                name  = status.get('name', 'Unknown')
-                state = status.get('state', 'UNKNOWN')
-                
-                # Navegamos la estructura interna de estadísticas de Mirth
-                stats_entries = status.get('statistics', {}).get('entry', [])
-                if isinstance(stats_entries, dict): 
-                    stats_entries = [stats_entries]
-                
-                # Inicializamos contadores para este canal
-                queued   = 0
-                sent     = 0
-                received = 0
-                errors_count = 0
-                
-                for entry in stats_entries:
-                    st_type = entry.get('com.mirth.connect.donkey.model.message.Status')
-                    st_val  = int(entry.get('long', 0))
-                    
-                    if st_type == 'QUEUED':     queued = st_val
-                    elif st_type == 'SENT':     sent = st_val
-                    elif st_type == 'RECEIVED': received = st_val
-                    elif st_type == 'ERROR':    errors_count = st_val
-                
-                # Construimos el objeto del canal con la métrica completa
-                canales_data.append({
-                    "channel":    name,
-                    "status":     state,
-                    "received":   received,
-                    "sent":       sent,
-                    "queued":     queued,
-                    "last_error": f"{errors_count} errores detectados" if errors_count > 0 else ""
-                })
-            
-            # 3. Cierre de sesión por seguridad
-            s.post(f"{url}/api/users/_logout", verify=False, timeout=5)
-            resultados[alias] = canales_data
-            
-        except Exception as e:
-            errores_globales += 1
-            meta_status = "partial"
-            if log_func: 
-                log_func(f"⚠️ Error Mirth ({alias}): {str(e)}")
-            
-            # Devolvemos un canal de error para que el servidor sepa por qué no hay datos
-            resultados[alias] = [{
-                "channel": "ERROR_CONEXION", 
-                "status": "OFFLINE", 
-                "received": 0, "sent": 0, "queued": 0, 
-                "last_error": str(e)
-            }]
-    
-    # Si fallaron todos los servidores configurados, el estado es Error total
-    if errores_globales == len(mirth_configs) and len(mirth_configs) > 0:
-        meta_status = "error"
-        
-    return resultados, meta_status, errores_globales
-

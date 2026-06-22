@@ -253,6 +253,9 @@ def reset_historial_sql():
     except Exception:
         return False
 
+@eel.expose
+def test_ssl_gui(data):
+    return agent_logic.test_ssl_gui(data)
 
 # ---------------------------------------------------------------------------
 # ARRANQUE
