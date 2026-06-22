@@ -1,18 +1,19 @@
 [Setup]
 ; --- Metadatos de la Aplicación ---
 AppName=TecnoMonitor Agent
-AppVersion=4.1 Gold
-AppPublisher=Tu Empresa (Soporte Técnico)
+AppVersion=4.3 Sentinel
+AppPublisher=Medical IT (Soporte Técnico)
 AppCopyright=Copyright (C) 2026
+
 ; Oculta la pantallita de "Bienvenido" para que sea una instalación más rápida
-DisableWelcomePage=no
+DisableWelcomePage=yes
 
 ; --- Rutas de Instalación ---
 ; {pf} es C:\Program Files (x86) o C:\Program Files dependiendo de la arquitectura
 DefaultDirName={pf}\TecnoMonitor
 DefaultGroupName=TecnoMonitor
 OutputDir=Output
-OutputBaseFilename=TecnoMonitor_v4.1_Setup
+OutputBaseFilename=TecnoMonitor_v4.3_Sentinel_Setup
 
 ; --- Iconos y Permisos ---
 SetupIconFile=logo.ico
@@ -46,7 +47,7 @@ Name: "{commondesktop}\TecnoMonitor Config"; Filename: "{app}\TecnoMonitorConfig
 ; 1. Crea la tarea programada maestra (Ejecuta como SYSTEM y con el nivel más alto de privilegios al iniciar sesión)
 Filename: "schtasks.exe"; Parameters: "/Create /F /TN ""TecnoMonitor_AutoStart"" /TR ""\""{app}\TecnoMonitorService.exe\"""" /SC ONLOGON /RU ""SYSTEM"" /RL HIGHEST"; Flags: runhidden
 
-; 2. Abre la interfaz gráfica automáticamente cuando termina de instalarse (¡Corregido con shellexec!)
+; 2. Abre la interfaz gráfica automáticamente cuando termina de instalarse
 Filename: "{app}\TecnoMonitorConfig.exe"; Description: "Abrir configuración de TecnoMonitor ahora"; Flags: postinstall nowait shellexec
 
 [UninstallRun]

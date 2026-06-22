@@ -102,6 +102,17 @@ def cargar_config_segura():
                     m["pass"] = security.desencriptar(m["pass"])
         # ----------------------------------------------
 
+        # --- AÑADE ESTO: Desencriptar Mirth Connect ---
+        if isinstance(data.get("mirth_servers"), list):
+            for m in data["mirth_servers"]:
+                if isinstance(m, dict) and m.get("pass"):
+                    m["pass"] = security.desencriptar(m["pass"])
+                    
+        # 👇 === NUEVO v4.3: Desencriptar ElasticSearch === 👇
+        if isinstance(data.get("elastic"), dict) and data["elastic"].get("pass"):
+            data["elastic"]["pass"] = security.desencriptar(data["elastic"]["pass"])
+        # ----------------------------------------------
+
         return data
 
     except json.JSONDecodeError as e:
@@ -115,7 +126,7 @@ def cargar_config_segura():
 # EJECUCIÓN PRINCIPAL
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    log("🚀 TecnoMonitor Service v4.1 — Iniciando")
+    log("🚀 TecnoMonitor Service v4.3 — Iniciando")
 
     if not obtener_candado():
         log("🚨 Puerto 64999 ocupado — ya hay una instancia corriendo. Saliendo.")

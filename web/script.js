@@ -159,6 +159,18 @@ async function cargarConfiguracion() {
             cfg.ssl_urls.forEach(urlObj => agregarSSL(urlObj));
         }
 
+        // --- 8. Monitoreo de Logs (Elastic) --- (NUEVO v4.3)
+        if (cfg.elastic) {
+            document.getElementById('elastic_host').value     = cfg.elastic.host || '';
+            document.getElementById('elastic_port').value     = cfg.elastic.port || 9200;
+            document.getElementById('elastic_user').value     = cfg.elastic.user || '';
+            document.getElementById('elastic_pass').value     = cfg.elastic.pass || '';
+            document.getElementById('elastic_lookback').value = cfg.elastic.lookback || 60;
+        }
+        const chkElastic = document.getElementById('enable_elastic');
+        chkElastic.checked = !!cfg.enabled_elastic;
+        toggleCard('elastic_body', chkElastic);
+
     } catch (e) {
         console.error("Error crítico al cargar configuración:", e);
     }
@@ -238,11 +250,21 @@ async function guardarConfiguracion() {
         enabled_vms: document.getElementById('enable_vms').checked,
         vms: vms,
 
-        enabled_mirth: document.getElementById('enable_mirth').checked, // NUEVO v4.1
-        mirth_servers: mirth_servers,                                   // NUEVO v4.1
+        enabled_mirth: document.getElementById('enable_mirth').checked,
+        mirth_servers: mirth_servers,
 
         enabled_ssl: document.getElementById('enable_ssl').checked,
-        ssl_urls: ssl_urls
+        ssl_urls: ssl_urls,
+
+        // --- NUEVO v4.3: Monitoreo de Logs (ElasticSearch) ---
+        enabled_elastic: document.getElementById('enable_elastic').checked,
+        elastic: {
+            host: document.getElementById('elastic_host').value.trim(),
+            port: parseInt(document.getElementById('elastic_port').value) || 9200,
+            user: document.getElementById('elastic_user').value.trim(),
+            pass: document.getElementById('elastic_pass').value,
+            lookback: parseInt(document.getElementById('elastic_lookback').value) || 60
+        }
     };
 
     try {
@@ -676,3 +698,33 @@ async function testSSL(btnElement) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GESTION ELASTIC (LOGS)
+// ---------------------------------------------------------------------------
+async function testElastic() {
+    const btn = window.event?.target?.closest('button');
+    let originalText = '<i class="fas fa-plug"></i> Test';
+    if (btn) { originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true; }
+
+    const data = {
+        host: document.getElementById('elastic_host').value.trim(),
+        port: parseInt(document.getElementById('elastic_port').value) || 9200,
+        user: document.getElementById('elastic_user').value.trim(),
+        pass: document.getElementById('elastic_pass').value
+    };
+
+    if (!data.host) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("⚠️ Ingresá el host/IP de ElasticSearch primero.");
+        return;
+    }
+
+    try {
+        const res = await eel.test_elastic_gui(data)();
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert(res.success ? `✅ ${res.msg}` : `❌ ${res.msg}`);
+    } catch (e) {
+        if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
+        alert("Error de comunicación con Python: " + e);
+    }
+}

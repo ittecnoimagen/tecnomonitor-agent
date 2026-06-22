@@ -19,12 +19,21 @@ import socket
 from urllib.parse import urlparse
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
+import re
 
 # ---------------------------------------------------------------------------
 # RUTAS Y CONSTANTES
 # ---------------------------------------------------------------------------
 DATA_DIR = security.get_app_data_path()
 SQL_CHECKPOINT_FILE = os.path.join(DATA_DIR, ".sql_checkpoint")
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- NUEVAS RUTAS ELASTIC ---
+ELASTIC_CHECKPOINT_FILE = os.path.join(DATA_DIR, ".elastic_checkpoint")
+UNKNOWNS_LAB_FILE = os.path.join(DATA_DIR, "unknowns_lab.json")
+# Asumimos que distribuirás el 'rules.json' junto al ejecutable o en el DATA_DIR
+RULES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules.json") 
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -1009,6 +1018,159 @@ def obtener_certificados_ssl(ssl_configs, log_func=None):
     return resultados, meta_status, errores_globales
 
 # ---------------------------------------------------------------------------
+# ELASTIC SEARCH (SUITESTENSA LOGS)
+# ---------------------------------------------------------------------------
+def test_connection_elastic(data):
+    try:
+        host = data.get("host", "").strip()
+        port = data.get("port", 9200)
+        url = f"http://{host}:{port}/"
+        auth = HTTPBasicAuth(data.get("user", ""), data.get("pass", "")) if data.get("user") else None
+        
+        r = requests.get(url, auth=auth, timeout=5)
+        if r.status_code == 200:
+            return {"success": True, "msg": "Conexión a ElasticSearch OK"}
+        return {"success": False, "msg": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"success": False, "msg": str(e)}
+
+def recolectar_logs_elastic(elastic_cfg, log_func=None):
+    resultado = {"events": [], "meta": {"scan_time": datetime.now().isoformat() + "Z", "new_alerts": 0}}
+    
+    # Cargar Reglas
+    rules = []
+    if os.path.exists(RULES_FILE):
+        try:
+            with open(RULES_FILE, 'r', encoding='utf-8') as f:
+                rules = json.load(f)
+        except Exception as e:
+            if log_func: log_func(f"⚠️ Error cargando rules.json: {e}")
+
+    # Leer Checkpoint
+    last_ts = None
+    if os.path.exists(ELASTIC_CHECKPOINT_FILE):
+        try:
+            with open(ELASTIC_CHECKPOINT_FILE, 'r') as f:
+                last_ts = f.read().strip()
+        except: pass
+
+    if not last_ts:
+        lookback = int(elastic_cfg.get('lookback', 60))
+        last_ts = f"now-{lookback}m"
+
+    if log_func:
+        log_func(f"🔍 Consultando ElasticSearch desde: {last_ts}")
+
+    payload = {
+        "size": 2000,
+        "query": {"bool": {"must": [
+            {"terms": {"level.keyword": ["Error", "Fatal", "Critical"]}},
+            {"range": {"@timestamp": {"gt": last_ts}}}
+        ]}},
+        "sort": [{"@timestamp": {"order": "asc"}}]
+    }
+
+    try:
+        host = elastic_cfg.get("host", "").strip()
+        port = elastic_cfg.get("port", 9200)
+        url = f"http://{host}:{port}/se-es-logging-*/_search"
+        auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
+        
+        resp = requests.post(url, json=payload, auth=auth, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get('hits', {}).get('hits', [])
+        
+        if log_func:
+            log_func(f"✅ ElasticSearch: {len(hits)} nuevos documentos encontrados.")
+            
+    except Exception as e:
+        if log_func: log_func(f"❌ Error de conexión a ElasticSearch: {e}")
+        raise e # Lanzamos la excepción para marcar el status general como 'error'
+
+    # Procesar Reglas
+    grouped_events = {}
+    newest_ts = last_ts
+    
+    for log in hits:
+        src = log['_source']
+        msg = src.get('message', '')
+        srv = src.get('Process', 'Unknown')
+        ts = src.get('@timestamp')
+        newest_ts = ts
+        
+        matched = False
+        for rule in rules:
+            if (rule.get('service_target') == "*" or rule.get('service_target') in srv) and re.search(rule.get('regex', ''), msg, re.I | re.S):
+                rid = rule.get('id')
+                if rid not in grouped_events:
+                    grouped_events[rid] = {
+                        "rule_id": rid, "severity": rule.get('severidad', 'HIGH'), "count": 1,
+                        "first_seen": ts, "last_seen": ts, "services_affected": [srv],
+                        "sample_evidence": msg[:250]
+                    }
+                else:
+                    grouped_events[rid]["count"] += 1
+                    grouped_events[rid]["last_seen"] = ts
+                    if srv not in grouped_events[rid]["services_affected"]: 
+                        grouped_events[rid]["services_affected"].append(srv)
+                matched = True
+                break
+                
+        if not matched:
+            rid = "UNKNOWN-ERR-99"
+            if rid not in grouped_events:
+                grouped_events[rid] = {
+                    "rule_id": rid, "severity": "WARNING", "count": 1,
+                    "first_seen": ts, "last_seen": ts, "services_affected": [srv],
+                    "sample_evidence": msg[:250]
+                }
+            else:
+                grouped_events[rid]["count"] += 1
+                grouped_events[rid]["last_seen"] = ts
+                if srv not in grouped_events[rid]["services_affected"]: 
+                    grouped_events[rid]["services_affected"].append(srv)
+
+    # Lógica de Unknowns (Laboratorio Local)
+    unknowns_detected = 0
+    lab_data = {"patterns": {}}
+    if os.path.exists(UNKNOWNS_LAB_FILE):
+        try:
+            with open(UNKNOWNS_LAB_FILE, 'r', encoding='utf-8') as f:
+                lab_data = json.load(f)
+        except: pass
+
+    for ev in grouped_events.values():
+        if ev["rule_id"] == "UNKNOWN-ERR-99":
+            pattern_key = ev["sample_evidence"][:100] 
+            if pattern_key not in lab_data["patterns"]:
+                lab_data["patterns"][pattern_key] = {
+                    "first_detected": ev["first_seen"], "last_detected": ev["last_seen"],
+                    "total_hits": ev["count"], "services": ev["services_affected"],
+                    "full_sample": ev["sample_evidence"]
+                }
+                unknowns_detected += 1
+            else:
+                lab_data["patterns"][pattern_key]["total_hits"] += ev["count"]
+                lab_data["patterns"][pattern_key]["last_detected"] = ev["last_seen"]
+
+    if unknowns_detected > 0:
+        if log_func: log_func(f"🤖 Laboratorio: {unknowns_detected} nuevos patrones de error registrados localmente.")
+        try:
+            with open(UNKNOWNS_LAB_FILE, 'w', encoding='utf-8') as f:
+                json.dump(lab_data, f, indent=4)
+        except: pass
+
+    resultado["events"] = list(grouped_events.values())
+    resultado["meta"]["new_alerts"] = len(resultado["events"])
+    
+    # Devolvemos también el checkpoint a guardar (¡solo si la API central responde OK!)
+    if hits:
+        resultado["_checkpoint_to_save"] = newest_ts
+        
+    return resultado
+
+# ---------------------------------------------------------------------------
 # CICLO PRINCIPAL DEL AGENTE
 # ---------------------------------------------------------------------------
 def ejecutar_ciclo_agente(config, log_callback=None):
@@ -1023,12 +1185,14 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         "sql":     {"enabled": config.get("enabled_sql",     False), "status": "disabled"},
         "mirth":   {"enabled": config.get("enabled_mirth",   False), "status": "disabled"},
         "ssl_monitoring": {"enabled": config.get("enabled_ssl", False), "status": "disabled"}, # NUEVO
+        # --- NUEVO v4.3 ---
+        "suitestensa_logs": {"enabled": config.get("enabled_elastic", False), "status": "disabled"}
     }
 
     reporte = {
         "envelope": {
-            "schema_version": "4.2",
-            "agent_version":  "4.2",
+            "schema_version": "4.3",
+            "agent_version":  "4.3",
             "hospital_id":    config.get("hospital_id", "UNKNOWN"),
             "timestamp":      datetime.now().isoformat(),
         },
@@ -1128,6 +1292,28 @@ def ejecutar_ciclo_agente(config, log_callback=None):
         collection_meta["ssl_monitoring"]["total"] = len(config["ssl_urls"])
         collection_meta["ssl_monitoring"]["errors"] = ssl_errors
 
+    # --- 6.8. Software Monitoring: Logs de Suitestensa (ElasticSearch) ---
+    if config.get("enabled_elastic") and config.get("elastic", {}).get("host"):
+        try:
+            elastic_data = recolectar_logs_elastic(config["elastic"], log_callback)
+            
+            # Guardamos el checkpoint en memoria para persistirlo post-envío
+            if "_checkpoint_to_save" in elastic_data:
+                config["_elastic_checkpoint_to_save"] = elastic_data.pop("_checkpoint_to_save")
+            
+            # Formamos el JSON final
+            reporte["software_monitoring"]["suitestensa_logs"] = {
+                "scan_time": elastic_data["meta"]["scan_time"],
+                "events": elastic_data["events"]
+            }
+            collection_meta["suitestensa_logs"]["status"] = "ok"
+            collection_meta["suitestensa_logs"]["new_alerts"] = elastic_data["meta"]["new_alerts"]
+            collection_meta["suitestensa_logs"]["errors"] = 0
+            
+        except Exception as e:
+            collection_meta["suitestensa_logs"]["status"] = "error"
+            collection_meta["suitestensa_logs"]["error"] = str(e)
+
     # --- 7. Envío al servidor central ---
     try:
         r = requests.post(
@@ -1146,6 +1332,18 @@ def ejecutar_ciclo_agente(config, log_callback=None):
                 save_checkpoint(checkpoint_dt)
                 if log_callback:
                     log_callback(f"💾 Checkpoint SQL guardado: {checkpoint_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # --- NUEVO v4.3: Checkpoint de ElasticSearch ---
+        if "_elastic_checkpoint_to_save" in config:
+            el_ts = config.pop("_elastic_checkpoint_to_save")
+            try:
+                tmp = ELASTIC_CHECKPOINT_FILE + ".tmp"
+                with open(tmp, 'w') as f:
+                    f.write(el_ts)
+                os.replace(tmp, ELASTIC_CHECKPOINT_FILE)
+                if log_callback: log_callback(f"💾 Checkpoint Elastic guardado: {el_ts}")
+            except Exception: pass
+        # -----------------------------------------------
 
         return {"status": "OK", "timestamp": datetime.now().strftime("%H:%M:%S")}
 

@@ -70,11 +70,14 @@ def _desencriptar_config(data: dict) -> dict:
             if isinstance(vm, dict) and vm.get("pass"):
                 vm["pass"] = security.desencriptar(vm["pass"])
 
-    # --- NUEVO: Desencriptar Mirth Connect ---
     if isinstance(data.get("mirth_servers"), list):
         for m in data["mirth_servers"]:
             if isinstance(m, dict) and m.get("pass"):
                 m["pass"] = security.desencriptar(m["pass"])
+
+    # --- NUEVO v4.3: Desencriptar ElasticSearch ---
+    if isinstance(data.get("elastic"), dict) and data["elastic"].get("pass"):
+        data["elastic"]["pass"] = security.desencriptar(data["elastic"]["pass"])
 
     return data
 
@@ -117,6 +120,10 @@ def guardar_config(config: dict):
             for m in config["mirth_servers"]:
                 if isinstance(m, dict) and m.get("pass"):
                     m["pass"] = security.encriptar(m["pass"])
+
+        # --- NUEVO v4.3: Encriptar ElasticSearch ---
+        if isinstance(config.get("elastic"), dict) and config["elastic"].get("pass"):
+            config["elastic"]["pass"] = security.encriptar(config["elastic"]["pass"])
 
         # Escritura atómica del JSON
         tmp = CONFIG_FILE + ".tmp"
@@ -256,6 +263,11 @@ def reset_historial_sql():
 @eel.expose
 def test_ssl_gui(data):
     return agent_logic.test_ssl_gui(data)
+
+# --- NUEVO v4.3: Test ElasticSearch ---
+@eel.expose
+def test_elastic_gui(data):
+    return agent_logic.test_connection_elastic(data)
 
 # ---------------------------------------------------------------------------
 # ARRANQUE
