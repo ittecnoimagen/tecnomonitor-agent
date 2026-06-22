@@ -1037,16 +1037,20 @@ def test_connection_elastic(data):
 def recolectar_logs_elastic(elastic_cfg, log_func=None):
     resultado = {"events": [], "meta": {"scan_time": datetime.now().isoformat() + "Z", "new_alerts": 0}}
     
-    # Cargar Reglas
+    # 1. CARGAR Y PRE-COMPILAR REGLAS
     rules = []
     if os.path.exists(RULES_FILE):
         try:
             with open(RULES_FILE, 'r', encoding='utf-8') as f:
-                rules = json.load(f)
+                raw_rules = json.load(f)
+                for r in raw_rules:
+                    if 'regex' in r and r['regex']:
+                        r['compiled_regex'] = re.compile(r['regex'], re.I | re.S)
+                        rules.append(r)
         except Exception as e:
             if log_func: log_func(f"⚠️ Error cargando rules.json: {e}")
 
-    # Leer Checkpoint
+    # 2. LEER CHECKPOINT
     last_ts = None
     if os.path.exists(ELASTIC_CHECKPOINT_FILE):
         try:
@@ -1061,51 +1065,76 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
     if log_func:
         log_func(f"🔍 Consultando ElasticSearch desde: {last_ts}")
 
-    payload = {
-        "size": 2000,
-        "query": {"bool": {"must": [
-            {"terms": {"level.keyword": ["Error", "Fatal", "Critical"]}},
-            {"range": {"@timestamp": {"gt": last_ts}}}
-        ]}},
-        "sort": [{"@timestamp": {"order": "asc"}}]
-    }
+    # 3. PAGINACIÓN CON SEARCH_AFTER (Escalabilidad)
+    host = elastic_cfg.get("host", "").strip()
+    port = elastic_cfg.get("port", 9200)
+    index_pattern = elastic_cfg.get("index_pattern", "se-es-logging-*") 
+    url = f"http://{host}:{port}/{index_pattern}/_search"
+    auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
 
+    all_hits = []
+    search_after = None
+    batch_size = 1000 
+    
     try:
-        host = elastic_cfg.get("host", "").strip()
-        port = elastic_cfg.get("port", 9200)
-        url = f"http://{host}:{port}/se-es-logging-*/_search"
-        auth = HTTPBasicAuth(elastic_cfg.get("user", ""), elastic_cfg.get("pass", "")) if elastic_cfg.get("user") else None
-        
-        resp = requests.post(url, json=payload, auth=auth, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        hits = data.get('hits', {}).get('hits', [])
-        
+        while True:
+            payload = {
+                "size": batch_size,
+                "query": {"bool": {"must": [
+                    {"terms": {"level.keyword": ["Error", "Fatal", "Critical"]}},
+                    {"range": {"@timestamp": {"gt": last_ts}}}
+                ]}},
+                "sort": [{"@timestamp": {"order": "asc"}}, {"_id": {"order": "asc"}}]
+            }
+            
+            if search_after:
+                payload["search_after"] = search_after
+
+            resp = requests.post(url, json=payload, auth=auth, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            hits = data.get('hits', {}).get('hits', [])
+            
+            if not hits:
+                break 
+                
+            all_hits.extend(hits)
+            
+            if len(hits) < batch_size:
+                break
+                
+            search_after = hits[-1].get('sort')
+
         if log_func:
-            log_func(f"✅ ElasticSearch: {len(hits)} nuevos documentos encontrados.")
+            log_func(f"✅ ElasticSearch: {len(all_hits)} nuevos documentos extraídos.")
             
     except Exception as e:
         if log_func: log_func(f"❌ Error de conexión a ElasticSearch: {e}")
-        raise e # Lanzamos la excepción para marcar el status general como 'error'
+        raise e 
 
-    # Procesar Reglas
+    # 4. PROCESAR REGLAS (Memoria Temporal)
     grouped_events = {}
     newest_ts = last_ts
     
-    for log in hits:
+    for log in all_hits:
         src = log['_source']
         msg = src.get('message', '')
         srv = src.get('Process', 'Unknown')
         ts = src.get('@timestamp')
-        newest_ts = ts
+        
+        if ts > newest_ts:
+            newest_ts = ts
         
         matched = False
         for rule in rules:
-            if (rule.get('service_target') == "*" or rule.get('service_target') in srv) and re.search(rule.get('regex', ''), msg, re.I | re.S):
+            target_match = (rule.get('service_target') == "*" or rule.get('service_target') in srv)
+            
+            if target_match and rule.get('compiled_regex') and rule['compiled_regex'].search(msg):
                 rid = rule.get('id')
                 if rid not in grouped_events:
+                    # Guardamos metadata extra temporalmente para el laboratorio
                     grouped_events[rid] = {
-                        "rule_id": rid, "severity": rule.get('severidad', 'HIGH'), "count": 1,
+                        "rule_id": rid, "count": 1,
                         "first_seen": ts, "last_seen": ts, "services_affected": [srv],
                         "sample_evidence": msg[:250]
                     }
@@ -1121,7 +1150,7 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
             rid = "UNKNOWN-ERR-99"
             if rid not in grouped_events:
                 grouped_events[rid] = {
-                    "rule_id": rid, "severity": "WARNING", "count": 1,
+                    "rule_id": rid, "count": 1,
                     "first_seen": ts, "last_seen": ts, "services_affected": [srv],
                     "sample_evidence": msg[:250]
                 }
@@ -1131,7 +1160,7 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
                 if srv not in grouped_events[rid]["services_affected"]: 
                     grouped_events[rid]["services_affected"].append(srv)
 
-    # Lógica de Unknowns (Laboratorio Local)
+    # 5. GESTIÓN DEL LABORATORIO LOCAL (Mantiene evidencia para analizar en el equipo)
     unknowns_detected = 0
     lab_data = {"patterns": {}}
     if os.path.exists(UNKNOWNS_LAB_FILE):
@@ -1161,11 +1190,18 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
                 json.dump(lab_data, f, indent=4)
         except: pass
 
-    resultado["events"] = list(grouped_events.values())
+    # 6. FORMATEO FINAL DEL PAYLOAD (Se reduce a la mínima expresión requerida)
+    resultado["events"] = [
+        {
+            "rule_id": ev["rule_id"],
+            "count": ev["count"]
+        }
+        for ev in grouped_events.values()
+    ]
+    
     resultado["meta"]["new_alerts"] = len(resultado["events"])
     
-    # Devolvemos también el checkpoint a guardar (¡solo si la API central responde OK!)
-    if hits:
+    if all_hits:
         resultado["_checkpoint_to_save"] = newest_ts
         
     return resultado
