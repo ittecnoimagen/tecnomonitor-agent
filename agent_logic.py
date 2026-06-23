@@ -1059,12 +1059,12 @@ def recolectar_logs_elastic(elastic_cfg, log_func=None):
         except: pass
 
     if not last_ts:
-        lookback = int(elastic_cfg.get('lookback', 60))
-        last_ts = f"now-{lookback}m"
+        # Usamos el intervalo global del agente en lugar del 'lookback' específico
+        last_ts = f"now-{global_interval_minutes}m"
 
     if log_func:
         log_func(f"🔍 Consultando ElasticSearch desde: {last_ts}")
-
+        
     # 3. PAGINACIÓN CON SEARCH_AFTER (Escalabilidad)
     host = elastic_cfg.get("host", "").strip()
     port = elastic_cfg.get("port", 9200)

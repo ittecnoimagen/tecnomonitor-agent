@@ -165,7 +165,6 @@ async function cargarConfiguracion() {
             document.getElementById('elastic_port').value     = cfg.elastic.port || 9200;
             document.getElementById('elastic_user').value     = cfg.elastic.user || '';
             document.getElementById('elastic_pass').value     = cfg.elastic.pass || '';
-            document.getElementById('elastic_lookback').value = cfg.elastic.lookback || 60;
         }
         const chkElastic = document.getElementById('enable_elastic');
         chkElastic.checked = !!cfg.enabled_elastic;
@@ -262,8 +261,7 @@ async function guardarConfiguracion() {
             host: document.getElementById('elastic_host').value.trim(),
             port: parseInt(document.getElementById('elastic_port').value) || 9200,
             user: document.getElementById('elastic_user').value.trim(),
-            pass: document.getElementById('elastic_pass').value,
-            lookback: parseInt(document.getElementById('elastic_lookback').value) || 60
+            pass: document.getElementById('elastic_pass').value
         }
     };
 
